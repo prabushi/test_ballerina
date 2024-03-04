@@ -1,0 +1,318 @@
+package org.factory.project;
+
+import org.factory.project.model.Job;
+import org.factory.project.model.input.DfAllocation;
+import org.factory.project.model.input.OperationData;
+import org.factory.project.model.input.WorkerInput;
+import org.factory.project.utils.FactoryUtils;
+
+import java.io.BufferedWriter;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.text.ParseException;
+import java.time.temporal.ChronoUnit;
+import java.util.*;
+
+public class FactoryOperation1 {
+    public static final Integer JOB_COUNT = 12;
+    private static final Integer OVERTIME_HOURS = 2;
+
+    public static void main(String[] args) throws ParseException {
+        Job[] jobList = getJobList();
+
+        // job id, <operation_id, operation>
+        Map<Integer, Map<Integer, OperationData>> operationMap = new HashMap<>();
+        for (int i = 0; i < JOB_COUNT; i++) {
+            operationMap.put(i + 1, new HashMap<>());
+        }
+
+        List<DfAllocation> allocations = FactoryUtils.readDfAllocationInput("/Users/ts-p.samarakoonarach/Rakuten/practice/MiProject/src/main/resources/input/allocation_original.csv");
+        for (DfAllocation allocation : allocations) {
+            System.out.println(allocation.toString());
+        }
+
+        List<WorkerInput> workerInputs = FactoryUtils.readEngineerInput();
+//        for (WorkerInput workerInput : workerInputs) {
+//            System.out.println(workerInput.toString());
+//        }
+
+        List<OperationData> operationDataList = FactoryUtils.readJobData();
+        for (OperationData operationData : operationDataList) {
+            int jobId = operationData.getJobId();
+            int operationId = operationData.getOperationId();
+            operationMap.get(jobId).put(operationId, operationData);
+            jobList[jobId - 1].getOperationDataList().add(operationData);
+
+            System.out.println(operationData);
+        }
+
+        //TODO: create worker priority list
+
+        // Set dependencies
+        for (OperationData operationData : operationDataList) {
+            List<Integer> precedences = operationData.getPrecedingOperations();
+            int jobId = operationData.getJobId();
+            for (Integer p : precedences) {
+                operationData.addDependency(operationMap.get(jobId).get(p.intValue()));
+            }
+        }
+        List<DfAllocation> allocationsOriginal = new ArrayList<>(allocations);
+
+        for (int i = 0; i < allocations.size(); i++) {
+
+            DfAllocation allocation = allocations.get(i);
+            Integer jId = allocation.getJobId();
+            Integer oId = allocation.getOperationId();
+            System.out.println("==========Change " + jId + ":" + oId);
+
+            for (int j = 1; j < 5; j++) {
+                List<DfAllocation> allocationsCopy = new ArrayList<>(allocationsOriginal);
+                Integer oldWorker = allocationsCopy.get(i).getWorkerId();
+                allocationsCopy.get(i).setWorkerId(j);
+
+                System.out.println("==========Old Worker " + oldWorker + " : new Worker" + j);
+
+                for (DfAllocation a : allocationsCopy) {
+                    System.out.println(a.toString());
+                }
+
+                calculateTimeConsumption(allocationsCopy, workerInputs, jobList);
+                writeOutput(allocations, "result_j" + jId + "_o" + oId + "_old" + oldWorker + "_new" + j);
+            }
+        }
+
+    }
+
+    public static Job[] getJobList() {
+        return new Job[]{new Job(1), new Job(2), new Job(3), new Job(4), new Job(5),
+                new Job(6), new Job(7), new Job(8), new Job(9), new Job(10), new Job(11), new Job(12)};
+    }
+
+    private static void writeOutput(List<DfAllocation> allocations, String fileName) {
+//        System.out.println("=== output ===");
+        String result = ",Job,Operation,Task type,Standard time,Allocated Worker,Processing_time,Start_time,End_time\n";
+        for (DfAllocation allocation : allocations) {
+            result = result.concat(allocation.toString()).concat("\n");
+
+        }
+        try {
+            BufferedWriter writer = new BufferedWriter(new FileWriter(fileName + ".csv"));
+            writer.write(result);
+            writer.close();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
+
+//        System.out.println("=== output2 ===");
+//        System.out.println(result);
+    }
+
+    public static void calculateTimeConsumption(List<DfAllocation> allocations, List<WorkerInput> workerInputs, Job[] jobList) {
+
+        for (DfAllocation allocation : allocations) {
+
+            WorkerInput worker = workerInputs.get(allocation.getWorkerId() - 1);
+
+            int processingTime = (int) Math.ceil(allocation.getStandardTime() / worker.getTaskItemList()[allocation.getTaskType().getId() - 1].getTaskId());
+
+//            if (processingTime != allocation.getProcessingTime()) {
+//                throw new RuntimeException("processing time error");
+//            }
+
+            Date possibleStartTime = worker.getLastFinishTime();
+            if (!hasAllDependenciesSetTime(jobList, allocation.getJobId(), allocation.getOperationId())) {
+                System.out.println("=== skip operation == " + allocation.getJobId() + ":" + allocation.getOperationId());
+                throw new RuntimeException("Cannot allocate time");
+
+            } else {
+                Date newDate = getPossibleStartTime(jobList, allocation.getJobId(), allocation.getOperationId(), possibleStartTime);
+                if (!newDate.equals(possibleStartTime)) {
+                    Calendar calendar = Calendar.getInstance();
+                    calendar.setTime(newDate);
+                    int hours = calendar.get(Calendar.HOUR_OF_DAY);
+                    int todayLeftTime = worker.getWorkingTime() + OVERTIME_HOURS - (hours - 9);
+                    if (todayLeftTime > 0) {
+                        worker.setHoursPerToday(hours - 9);
+                        possibleStartTime = newDate;
+
+                    } else {
+                        worker.setHoursPerToday(0);
+                        possibleStartTime = getNextDayStart(newDate);
+                    }
+                }
+            }
+
+            int todayHours = worker.getHoursPerToday();
+            worker.setLastFinishTime(possibleStartTime); // Might not need
+            allocation.setStartTime(possibleStartTime);
+
+            int workingHours = worker.getWorkingTime(); // +2 overtime
+
+            if ((todayHours + processingTime) < (workingHours + OVERTIME_HOURS)) {
+                // within the day
+                if ((todayHours + processingTime) <= workingHours) {
+                    worker.incrementWorkHours(processingTime);
+                    worker.incrementOvertimeWorkHours(0);
+
+                } else {
+                    // use overtime
+                    int ot = todayHours + processingTime - workingHours;
+                    int nonOt = processingTime - ot;
+
+                    worker.incrementWorkHours(nonOt);
+                    worker.incrementOvertimeWorkHours(ot);
+                }
+
+                allocation.setEndTime(Date.from(allocation.getStartTime().toInstant().plus(processingTime, ChronoUnit.HOURS)));
+                worker.setLastFinishTime(allocation.getEndTime());
+                worker.setHoursPerToday(todayHours + processingTime);
+
+            } else if ((todayHours + processingTime) == (workingHours + OVERTIME_HOURS)) {
+                // set today's hours 0 and next day's 9 as finish time
+                // can be just OT or OT + nonOT
+
+                if (todayHours > workingHours) {
+                    //OT
+                    worker.incrementWorkHours(0);
+                    worker.incrementOvertimeWorkHours(processingTime);
+                } else {
+                    int ot = todayHours + processingTime - workingHours;
+                    int nonOt = processingTime - ot;
+
+                    worker.incrementWorkHours(nonOt);
+                    worker.incrementOvertimeWorkHours(ot);
+                }
+
+                allocation.setEndTime(Date.from(allocation.getStartTime().toInstant().plus(processingTime, ChronoUnit.HOURS)));
+                worker.setLastFinishTime(getNextDayStart(allocation.getEndTime()));
+                worker.setHoursPerToday(0);
+
+            } else {
+                // (todayHours + processingTime) > (workingHours + OVERTIME_HOURS) -> break to next day
+                int doneProcessingTime = 0;
+                Date initialOperationStartTime = allocation.getStartTime();
+
+                while (processingTime > 0) {
+
+                    todayHours = worker.getHoursPerToday();
+                    if (todayHours + processingTime <= workingHours) {
+                        // finish today in the middle
+                        worker.incrementWorkHours(processingTime);
+                        worker.incrementOvertimeWorkHours(0);
+                        doneProcessingTime = processingTime;
+                        allocation.setEndTime(Date.from(allocation.getStartTime().toInstant().plus(processingTime, ChronoUnit.HOURS)));
+                        worker.setHoursPerToday(todayHours + processingTime);
+                        worker.setLastFinishTime(allocation.getEndTime());
+
+                    } else if (todayHours + processingTime < workingHours + OVERTIME_HOURS) {
+                        // finish today in the middle of OT
+                        int ot = todayHours + processingTime - workingHours;
+                        worker.incrementWorkHours(0);
+                        worker.incrementOvertimeWorkHours(ot);
+                        doneProcessingTime = ot;
+                        allocation.setEndTime(Date.from(allocation.getStartTime().toInstant().plus(ot, ChronoUnit.HOURS)));
+                        worker.setHoursPerToday(todayHours + ot);
+                        worker.setLastFinishTime(allocation.getEndTime());
+
+                    } else if (todayHours + processingTime == workingHours + OVERTIME_HOURS) {
+                        // finish today exact at the end
+                        int ot = todayHours + processingTime - workingHours;
+                        worker.incrementWorkHours(0);
+                        worker.incrementOvertimeWorkHours(ot);
+                        doneProcessingTime = ot;
+
+                        allocation.setEndTime(Date.from(allocation.getStartTime().toInstant().plus(ot, ChronoUnit.HOURS)));
+                        worker.setLastFinishTime(getNextDayStart(allocation.getEndTime()));
+                        worker.setHoursPerToday(0);
+
+                    } else {
+                        // if split the day
+                        int totalCanToday = workingHours + OVERTIME_HOURS - todayHours;
+                        if (totalCanToday <= OVERTIME_HOURS) {
+                            // only OT
+                            worker.incrementWorkHours(0);
+                            worker.incrementOvertimeWorkHours(totalCanToday);
+
+                        } else {
+                            // OT + nonOT
+                            worker.incrementWorkHours(totalCanToday - OVERTIME_HOURS);
+                            worker.incrementOvertimeWorkHours(OVERTIME_HOURS);
+                        }
+                        doneProcessingTime = totalCanToday;
+                        // go to next day
+
+                        allocation.setEndTime(Date.from(allocation.getStartTime().toInstant().plus(doneProcessingTime, ChronoUnit.HOURS)));
+                        worker.setHoursPerToday(0);
+                        worker.setLastFinishTime(getNextDayStart(allocation.getEndTime()));
+                    }
+
+                    allocation.setStartTime(worker.getLastFinishTime());
+                    processingTime = processingTime - doneProcessingTime;
+                }
+
+                allocation.setStartTime(initialOperationStartTime);
+
+            }
+
+            worker.incrementTaskCount(allocation.getTaskType());
+            markOperationFinishTime(jobList, allocation.getJobId(), allocation.getOperationId(), allocation.getEndTime());
+        }
+
+    }
+
+    private static Date getNextDayStart(Date date) {
+        // Return next day 9 am
+        Calendar calendar = Calendar.getInstance();
+        calendar.setTime(date);
+        int hours = calendar.get(Calendar.HOUR_OF_DAY);
+        int minutes = calendar.get(Calendar.MINUTE);
+        int seconds = calendar.get(Calendar.SECOND);
+
+        return Date.from(date.toInstant().plus(60 - minutes - 1, ChronoUnit.MINUTES)
+                .plus(60 - seconds, ChronoUnit.SECONDS)
+                .plus(24 - hours - 1 + 9, ChronoUnit.HOURS));
+    }
+
+    private static boolean hasAllDependenciesSetTime(Job[] jobList, int jobId, int operationId) {
+        List<OperationData> operationData = jobList[jobId - 1].getOperationDataList();
+        List<OperationData> dependencies = operationData.get(operationId - 1).getDependentOperations();
+        if (dependencies == null || dependencies.size() == 0) {
+            return true;
+        }
+
+        for (int i = 0; i < dependencies.size(); i++) {
+            OperationData op = dependencies.get(i);
+            if (!op.isHasSetTime()) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static Date getPossibleStartTime(Job[] jobList, int jobId, int operationId, Date possibleStartTime) {
+        List<OperationData> operationData = jobList[jobId - 1].getOperationDataList();
+        List<OperationData> dependencies = operationData.get(operationId - 1).getDependentOperations();
+        if (dependencies == null || dependencies.size() == 0) {
+            return possibleStartTime;
+        }
+
+        Date lastestDate = possibleStartTime;
+
+        for (int i = 0; i < dependencies.size(); i++) {
+            OperationData op = dependencies.get(i);
+            if (op.getFinishTime().after(lastestDate)) {
+                lastestDate = op.getFinishTime();
+            }
+        }
+
+        return lastestDate;
+    }
+
+    private static void markOperationFinishTime(Job[] jobList, int jobId, int operationId, Date date) {
+        List<OperationData> operationData = jobList[jobId - 1].getOperationDataList();
+        operationData.get(operationId - 1).setFinishTime(date);
+        operationData.get(operationId - 1).setHasSetTime(true);
+    }
+}
